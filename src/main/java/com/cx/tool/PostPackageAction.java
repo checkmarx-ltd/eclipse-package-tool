@@ -1,5 +1,6 @@
 package com.cx.tool;
 
+import com.cx.tool.util.FileUtil;
 import org.w3c.dom.Document;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
@@ -45,9 +46,9 @@ public class PostPackageAction {
         };
         File srcFile = new File(args[0]).listFiles(filter)[0];
 
-        File tempDir = new File("C:\\tmp\\workspace\\CxEclipsePlugin-Temp");
-        String srcArtJar = "C:\\tmp\\workspace\\CxEclipsePlugin-Temp\\artifacts.jar";
-        String trgArtJar = "C:\\tmp\\workspace\\CxEclipsePlugin-Temp\\artifacts22.jar";
+        File tempDir = new File(args[0] + "\\CxEclipsePlugin-Temp");
+        String srcArtJar = args[0] + "\\CxEclipsePlugin-Temp\\artifacts.jar";
+        String trgArtJar = args[0] + "\\CxEclipsePlugin-Temp\\artifacts-temp.jar";
 
         extract(srcFile, tempDir);
 
@@ -121,7 +122,7 @@ public class PostPackageAction {
 
         zipFolder(tempDirPath, Paths.get(tempDirPath.toString() + ".zip"));
 
-        tempDirPath.toFile().delete();
+        FileUtil.deleteDirectory(tempDirPath.toFile());
         Files.deleteIfExists(srcFilePath);
     }
 
