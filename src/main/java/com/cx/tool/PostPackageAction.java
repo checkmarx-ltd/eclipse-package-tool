@@ -4,29 +4,28 @@ import com.cx.tool.util.FileUtil;
 import org.w3c.dom.Document;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
-import org.xml.sax.SAXException;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.Result;
 import javax.xml.transform.Source;
-import javax.xml.transform.TransformerException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import javax.xml.xpath.XPath;
 import javax.xml.xpath.XPathConstants;
-import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
 import java.io.*;
-import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Enumeration;
+import java.util.Objects;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
@@ -38,20 +37,70 @@ public class PostPackageAction {
 
     private static final int BUFFER_SIZE = 4096;
 
-    public static void main(String[] args) throws IOException, ParserConfigurationException, SAXException, XPathExpressionException, TransformerException {
+    public static void main(String[] args) throws Exception {
         FilenameFilter filter = new FilenameFilter() {
             public boolean accept(File dir, String name) {
                 return name.startsWith("CxEclipsePlugin");
             }
         };
-        File srcFile = new File(args[0]).listFiles(filter)[0];
+        File srcFile = Objects.requireNonNull(new File(args[0]).listFiles(filter))[0];
 
         File tempDir = new File(args[0] + "\\CxEclipsePlugin-Temp");
         String srcArtJar = args[0] + "\\CxEclipsePlugin-Temp\\artifacts.jar";
         String trgArtJar = args[0] + "\\CxEclipsePlugin-Temp\\artifacts-temp.jar";
 
         extract(srcFile, tempDir);
+        genFixedArtifactJar(srcArtJar, trgArtJar);
 
+        Files.deleteIfExists(Paths.get(srcArtJar));
+        new File(trgArtJar).renameTo(new File(srcArtJar));
+
+        String pluginName = srcFile.getName();
+
+        Path srcFilePath = Paths.get(srcFile.getCanonicalPath()
+                .substring(0, srcFile.getCanonicalPath().lastIndexOf(".zip")) + "-org.zip");
+        srcFile.renameTo(srcFilePath.toFile());
+
+        String trgZip = args[0] + "\\" + pluginName;
+
+        zipPlugin(srcFilePath.toString(), trgZip, srcArtJar);
+
+        FileUtil.deleteDirectory(tempDir);
+        Files.deleteIfExists(srcFilePath);
+    }
+
+    private static void zipPlugin(String orgZip, String trgZip, String trgArtJar) throws Exception {
+        ZipFile zipFile = new ZipFile(orgZip);
+        final ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(trgZip));
+        for (Enumeration e = zipFile.entries(); e.hasMoreElements(); ) {
+            ZipEntry entryIn = (ZipEntry) e.nextElement();
+            if (!entryIn.getName().equalsIgnoreCase("artifacts.jar")) {
+                zos.putNextEntry(entryIn);
+                InputStream is = zipFile.getInputStream(entryIn);
+                byte[] buf = new byte[1024];
+                int len;
+                while ((len = is.read(buf)) > 0) {
+                    zos.write(buf, 0, len);
+                }
+                is.close();
+            } else {
+                zos.putNextEntry(new ZipEntry("artifacts.jar"));
+
+                InputStream is = new FileInputStream(new File(trgArtJar));
+                byte[] buf = new byte[1024];
+                int len;
+                while ((len = is.read(buf)) > 0) {
+                    zos.write(buf, 0, len);
+                }
+                is.close();
+            }
+            zos.closeEntry();
+        }
+        zos.close();
+        zipFile.close();
+    }
+
+    private static void genFixedArtifactJar(String srcArtJar, String trgArtJar) throws Exception {
         JarFile artJar = new JarFile(srcArtJar);
         FileOutputStream fos = new FileOutputStream(trgArtJar);
         final JarOutputStream jos = new JarOutputStream(fos);
@@ -76,6 +125,7 @@ public class PostPackageAction {
                     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
                     DocumentBuilder builder = factory.newDocumentBuilder();
                     Document doc = builder.parse(is);
+                    doc.setXmlStandalone(true);
                     XPath xPath = XPathFactory.newInstance().newXPath();
                     NodeList propertyNodes = (NodeList) xPath.evaluate("//property[@name='download.md5']", doc, XPathConstants.NODESET);
                     for (int i = 0; i < propertyNodes.getLength(); i++) {
@@ -106,37 +156,6 @@ public class PostPackageAction {
         }
         jos.close();
         artJar.close();
-
-        Files.deleteIfExists(Paths.get(srcArtJar));
-        new File(trgArtJar).renameTo(new File(srcArtJar));
-
-        String pluginName = srcFile.getName();
-
-        Path srcFilePath = Paths.get(srcFile.getCanonicalPath()
-                .substring(0, srcFile.getCanonicalPath().lastIndexOf(".zip")) + "-org.zip");
-        srcFile.renameTo(srcFilePath.toFile());
-
-        Path tempDirPath = Paths.get(tempDir.getCanonicalPath()
-                .substring(0, tempDir.getCanonicalPath().lastIndexOf("\\") + 1) + pluginName.substring(0, pluginName.lastIndexOf(".zip")));
-        tempDir.renameTo(tempDirPath.toFile());
-
-        zipFolder(tempDirPath, Paths.get(tempDirPath.toString() + ".zip"));
-
-        FileUtil.deleteDirectory(tempDirPath.toFile());
-        Files.deleteIfExists(srcFilePath);
-    }
-
-    private static void zipFolder(final Path sourceFolderPath, Path zipPath) throws IOException {
-        final ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipPath.toFile()));
-        Files.walkFileTree(sourceFolderPath, new SimpleFileVisitor<Path>() {
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                zos.putNextEntry(new ZipEntry(sourceFolderPath.relativize(file).toString()));
-                Files.copy(file, zos);
-                zos.closeEntry();
-                return FileVisitResult.CONTINUE;
-            }
-        });
-        zos.close();
     }
 
     public static void extract(File zipfile, File outdir) {
