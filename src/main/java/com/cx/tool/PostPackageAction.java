@@ -27,7 +27,7 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 /**
@@ -61,10 +61,10 @@ public class PostPackageAction {
         extract(srcFile, tempDir);
         genFixedArtifactJar(srcArtJar, trgArtJar);
 
-        signJars(tempDir);
-
         Files.deleteIfExists(Paths.get(srcArtJar));
         new File(trgArtJar).renameTo(new File(srcArtJar));
+
+        signJars(tempDir);
 
         String pluginName = srcFile.getAbsolutePath();
         Files.deleteIfExists(srcFile.toPath());
@@ -82,6 +82,9 @@ public class PostPackageAction {
             File srcFile = new File(fileToZip);
             if (excludeContainingFolder && srcFile.isDirectory()) {
                 for (String fileName : srcFile.list()) {
+                    if (fileName.endsWith(".xz") || fileName.equals("p2.index")) {
+                        continue;
+                    }
                     addToZip("", fileToZip + "/" + fileName, zipOut);
                 }
             } else {
@@ -103,16 +106,15 @@ public class PostPackageAction {
                 addToZip(filePath, srcFile + "/" + fileName, zipOut);
             }
         } else {
-            zipOut.putNextEntry(new ZipEntry(filePath));
-            FileInputStream in = new FileInputStream(srcFile);
-            try {
-                byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-                int len;
-                while ((len = in.read(buffer)) != -1) {
-                    zipOut.write(buffer, 0, len);
+            if (!filePath.endsWith(".sig")) {
+                zipOut.putNextEntry(new ZipEntry(filePath));
+                try (FileInputStream in = new FileInputStream(srcFile)) {
+                    byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
+                    int len;
+                    while ((len = in.read(buffer)) != -1) {
+                        zipOut.write(buffer, 0, len);
+                    }
                 }
-            } finally {
-                in.close();
             }
         }
     }
@@ -164,16 +166,29 @@ public class PostPackageAction {
                     Document doc = builder.parse(is);
                     doc.setXmlStandalone(true);
                     XPath xPath = XPathFactory.newInstance().newXPath();
-                    NodeList propertyNodes = (NodeList) xPath.evaluate("//property[@name='download.md5']", doc, XPathConstants.NODESET);
+                    NodeList propertyNodes = (NodeList) xPath.evaluate("//property[contains(@name,'download.checksum.') or @name='download.md5']", doc, XPathConstants.NODESET);
                     for (int i = 0; i < propertyNodes.getLength(); i++) {
                         Node node = propertyNodes.item(i);
-                        Node size = node.getParentNode().getAttributes().getNamedItem("size");
-                        int sizeInt = Integer.valueOf(size.getNodeValue());
-                        size.setNodeValue(String.valueOf(sizeInt - 1));
                         Node nextSibling = node.getNextSibling();
                         node.getParentNode().removeChild(node);
                         nextSibling.getParentNode().removeChild(nextSibling.getPreviousSibling());
                     }
+                    // Fix properties element size
+                    NodeList propertiesNodes = (NodeList) xPath.evaluate("//properties", doc, XPathConstants.NODESET);
+                    for (int i = 0; i < propertiesNodes.getLength(); i++) {
+                        Node node = propertiesNodes.item(i);
+                        NodeList nodes = node.getChildNodes();
+                        int count = 0;
+                        for (int j = 0; j < nodes.getLength(); j++) {
+                            Node n = nodes.item(j);
+                            if (n.getNodeName().equalsIgnoreCase("property")) {
+                                count++;
+                            }
+                        }
+                        Node size = node.getAttributes().getNamedItem("size");
+                        size.setNodeValue(String.valueOf(count));
+                    }
+
                     Source xmlSource = new DOMSource(doc);
                     Result outputTarget = new StreamResult(outputStream);
                     TransformerFactory.newInstance().newTransformer().transform(xmlSource, outputTarget);
@@ -196,50 +211,47 @@ public class PostPackageAction {
     }
 
     public static void extract(File zipfile, File outdir) {
-        try (ZipInputStream zin = new ZipInputStream(new FileInputStream(zipfile))) {
-            ZipEntry entry;
-            String name, dir;
-            while ((entry = zin.getNextEntry()) != null) {
-                name = entry.getName();
-                if (entry.isDirectory()) {
-                    mkdirs(outdir, name);
+        try {
+            // Open the zip file
+            ZipFile zipFile = new ZipFile(zipfile);
+            Enumeration<?> enu = zipFile.entries();
+            while (enu.hasMoreElements()) {
+                ZipEntry zipEntry = (ZipEntry) enu.nextElement();
+
+                String name = zipEntry.getName();
+                long size = zipEntry.getSize();
+                long compressedSize = zipEntry.getCompressedSize();
+                System.out.printf("name: %-20s | size: %6d | compressed size: %6d\n",
+                        name, size, compressedSize);
+
+                // Do we need to create a directory ?
+                File file = new File(outdir + File.separator + name);
+                if (name.endsWith("/")) {
+                    file.mkdirs();
                     continue;
                 }
 
-                dir = dirpart(name);
-                if (dir != null)
-                    mkdirs(outdir, dir);
+                File parent = file.getParentFile();
+                if (parent != null) {
+                    parent.mkdirs();
+                }
 
-                extractFile(zin, outdir, name);
+                // Extract the file
+                InputStream is = zipFile.getInputStream(zipEntry);
+                FileOutputStream fos = new FileOutputStream(file);
+                byte[] bytes = new byte[1024];
+                int length;
+                while ((length = is.read(bytes)) >= 0) {
+                    fos.write(bytes, 0, length);
+                }
+                is.close();
+                fos.close();
+
             }
+            zipFile.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
-    }
-
-    private static void extractFile(ZipInputStream in, File outdir, String name) throws IOException {
-        byte[] buffer = new byte[BUFFER_SIZE];
-        BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(new File(outdir, name)));
-        try {
-            int count = -1;
-            while ((count = in.read(buffer)) != -1) {
-                out.write(buffer, 0, count);
-            }
-        } finally {
-            out.flush();
-            out.close();
-        }
-    }
-
-    private static void mkdirs(File outdir, String path) {
-        File d = new File(outdir, path);
-        if (!d.exists())
-            d.mkdirs();
-    }
-
-    private static String dirpart(String name) {
-        int s = name.lastIndexOf(File.separatorChar);
-        return s == -1 ? null : name.substring(0, s);
     }
 
     private static boolean isJarSigned(File jarFile) throws IOException {
